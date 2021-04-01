@@ -206,6 +206,128 @@ extern "C" {
   }
 }
 
+// A set of primitives to trick with the environemnt variables
+// to mark child processes.
+// As gperftools is commonly loaded dynamically using LD_PRELOAD,
+// users are leveraging environment variables to communicate the parameters
+// to the corresponding gperftools library.
+// Specifically, a set of environment variables are used to specify the file
+// paths to be used during the operation (i.e. output profile filename).
+// When the application is using fork() to spawn more processes, it is important
+// to avoid conflicts where both the parent and a child area using the same
+// filename.
+// In order to do so, the parent reads the user-defined environment and toggles
+// the MSB of the first byte in it's value to indicate that all other processes
+// using this variable are children (and thus) must append a unique identifier
+// (PID) as a suffix to the corresponsing filename.
+static void EnvChildSignSet(char *enval) {
+  enval[0] |= 128;
+}
+
+static void EnvChildSignDrop(char *enval) {
+  enval[0] &= ~128;
+}
+
+static bool EnvChildSignIsOn(char *enval) {
+  return (enval[0] & 128);
+}
+
+#define PID_SUFFIX "_"
+#define PMIX_SUFFIX ".rank-"
+#define SLURM_SUFFIX ".procid-"
+
+static char *AppendPtr(char *str){
+  return str + slow_strlen(str);
+}
+
+static size_t AppendLen(char *str, size_t max_total){
+  size_t cur_len = slow_strlen(str);
+  return (cur_len <= max_total) ? (max_total - cur_len) : 0;
+}
+
+
+// Check if for the requested variable there is the forcing one in a form of
+// <ORIG_ENVAR>_USE_PID that requests PID t obe used in the file names
+bool CheckPIDIsForced(const char* env_name) {
+  char varName[PATH_MAX];
+  const char *expect = "1";
+
+  snprintf(varName, PATH_MAX, "%s_USE_PID", env_name);
+  const char* envval = getenv(varName);
+  if (NULL == envval) {
+    /* No such variable */
+    return false;
+  }
+  if (!slow_memcmp(envval, expect, slow_strlen(expect) + 1)) {
+    return true;
+  }
+  return false;
+}
+
+// HPC environment auto-detection
+// For HPC applications (MPI, OpenSHMEM, etc), it is typical for multiple
+// processes not engaged in parent-child relations to be executed on the
+// same host.
+// In order to enable gperftools to analyze them, these processes need to be
+// assigned individual file paths for the files being used.
+// The function below is trying to discover well-known HPC environments and
+// take advantage of that environment to generate meaningful profile filenames
+static bool AppendHPCEnvironment(char *suffix) {
+  char* enval;
+
+  // Check for the PMIx environment
+  enval = getenv("PMIX_RANK");
+  if (enval) {
+    /* PMIx exposes the rank that is convenient to be used */
+    snprintf(AppendPtr(suffix), AppendLen(suffix, PATH_MAX),
+             PMIX_SUFFIX "%s",  enval);
+    return false;
+  }
+
+  // Check for the Slurm environment
+  enval = getenv("SLURM_JOBID");
+  if (enval) {
+    enval = getenv("SLURM_PROCID");
+    if (enval) {
+      snprintf(AppendPtr(suffix), AppendLen(suffix, PATH_MAX),
+               SLURM_SUFFIX "%s", enval);
+      return false;
+    }
+    return true;
+  }
+
+  /* Check for Open MPI environment */
+  enval = getenv("OMPI_HOME");
+  if (enval) {
+    return true;
+  }
+
+  // TODO: Detect other environments - MPICH
+
+  // No HPC environment was detected
+  return false;
+}
+
+
+
+void SetUniquePathSuffix(const char* env_name, char *suffix,
+                         const bool isChild) {
+  bool hpcWantPid = false;
+
+  /* Initialize for the no-suffix case */
+  suffix[0] = '\0';
+
+  // Append HPC environment suffix
+  hpcWantPid = AppendHPCEnvironment(suffix);
+
+  if (isChild || hpcWantPid || CheckPIDIsForced(env_name)) {
+    snprintf(AppendPtr(suffix), AppendLen(suffix, PATH_MAX),
+             PID_SUFFIX "%d", getpid());
+  }
+
+  // Exit with the empty suffix - the trivial case
+}
+
 // This takes as an argument an environment-variable name (like
 // CPUPROFILE) whose value is supposed to be a file-path, and sets
 // path to that path, and returns true.  If the env var doesn't exist,
@@ -230,15 +352,19 @@ extern "C" {
 // TODO(csilvers): set an envvar instead when we can do it reliably.
 bool GetUniquePathFromEnv(const char* env_name, char* path) {
   char* envval = getenv(env_name);
+  char suffix[PATH_MAX];
   if (envval == NULL || *envval == '\0')
     return false;
-  if (envval[0] & 128) {                  // high bit is set
-    snprintf(path, PATH_MAX, "%c%s_%u",   // add pid and clear high bit
-             envval[0] & 127, envval+1, (unsigned int)(getpid()));
-  } else {
-    snprintf(path, PATH_MAX, "%s", envval);
-    envval[0] |= 128;                     // set high bit for kids to see
-  }
+
+  // Get information about the child bit and drop it
+  const bool is_child = EnvChildSignIsOn(envval);
+  EnvChildSignDrop(envval);
+
+  SetUniquePathSuffix(env_name, suffix, is_child);
+  snprintf(path, PATH_MAX, "%s%s", envval, suffix);
+
+  // Set the child bit for the fork'd processes
+  EnvChildSignSet(envval);
   return true;
 }
 
