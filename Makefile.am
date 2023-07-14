@@ -526,6 +526,20 @@ ADDRESSMAP_UNITTEST_INCLUDES = src/addressmap-inl.h \
                                $(LOGGING_INCLUDES)
 addressmap_unittest_SOURCES = src/tests/addressmap_unittest.cc \
                               $(ADDRESSMAP_UNITTEST_INCLUDES)
+
+
+TESTS += unique_path_unittest
+WINDOWS_PROJECTS += vsprojects/unique_path_unittest/unique_path_unittest.vcxproj
+UNIQUE_PATH_UNITTEST_INCLUDES = src/base/sysinfo.h \
+                                src/base/commandlineflags.h \
+                                $(LOGGING_INCLUDES)
+unique_path_unittest_SOURCES = src/tests/unique_path_unittest.cc \
+                              $(UNIQUE_PATH_UNITTEST_INCLUDES)
+unique_path_unittest_CXXFLAGS = $(PTHREAD_CFLAGS) $(AM_CXXFLAGS)
+unique_path_unittest_LDFLAGS = $(PTHREAD_CFLAGS) $(TCMALLOC_FLAGS)
+unique_path_unittest_LDADD = $(LIBTCMALLOC_MINIMAL) $(PTHREAD_LIBS)
+
+
 if MINGW
 addressmap_unittest_SOURCES += src/windows/port.h src/windows/port.cc
 endif MINGW
